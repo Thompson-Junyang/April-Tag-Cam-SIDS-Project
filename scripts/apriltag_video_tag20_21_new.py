@@ -595,6 +595,208 @@
 
 
 
+# #!/usr/bin/env python
+
+# from argparse import ArgumentParser
+# import os
+# import cv2
+# import numpy as np
+# import apriltag
+# # >>> ADDED: for timestamps & CSV
+# import csv
+# import time
+# from datetime import datetime
+
+# ################################################################################
+
+# def apriltag_video(input_streams=[0],
+#                    output_stream=False,
+#                    display_stream=True,
+#                    detection_window_name='AprilTag'):
+#     """
+#     Detect ONLY tags 20 and 21 from video. If both are visible,
+#     draw a line between their image centers and display:
+#       - pixel distance between centers
+#       - 3D distance between tag centers (in meters), using pose estimation
+#     """
+
+#     parser = ArgumentParser(description='Detect AprilTags from video stream.')
+#     apriltag.add_arguments(parser)
+#     options = parser.parse_args()
+
+#     # Set up a reasonable search path for the apriltag DLL/so/dylib.
+#     detector = apriltag.Detector(options, searchpath=apriltag._get_dll_path())
+
+#     # Hard-coded camera intrinsics and tag size (in meters)
+#     camera_params = (1408.421651570743, 1405.3445689921414, 1028.1372748266583, 539.4602383823626)
+#     # fx, fy, cx, cy
+#     tag_size_m = 0.049  # meters
+
+#     want_ids = {22, 23}
+
+#     for stream in input_streams:
+#         video = cv2.VideoCapture(stream)
+
+#         # Force 1080p (as before)
+#         video.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+#         video.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+#         # >>> ADDED: helpful smoothness defaults (safe to keep)
+#         video.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+#         video.set(cv2.CAP_PROP_FPS, 30)
+#         video.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+#         actual_w = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
+#         actual_h = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+#         actual_fps = video.get(cv2.CAP_PROP_FPS)
+#         print(f"[INFO] Capture at {actual_w}x{actual_h} @ {actual_fps:.1f} FPS")
+
+#         # >>> ADDED: CSV accumulation & timing anchors
+#         rows = []                 # each row: [timestamp_ms, elapsed_ms, pix_dist, m_dist]
+#         t0_ns = None              # first-data high-res timestamp (perf counter)
+#         # CSV filename with start time (wall clock)
+#         csv_name = f"distance_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+#         output = None
+#         if output_stream:
+#             width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
+#             height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+#             fps = int(video.get(cv2.CAP_PROP_FPS)) or 30
+#             codec = cv2.VideoWriter_fourcc(*'XVID')
+#             if type(stream) != int:
+#                 output_path = os.path.join('..', 'media', 'output', os.path.splitext(os.path.basename(str(stream)))[0] + '.avi')
+#             else:
+#                 output_path = os.path.join('..', 'media', 'output', f'camera_{stream}.avi')
+#             os.makedirs(os.path.dirname(output_path), exist_ok=True)
+#             output = cv2.VideoWriter(output_path, codec, fps, (width, height))
+
+#         # (keep optional print throttling if you need it)
+#         frame_i = 0
+
+#         while video.isOpened():
+#             success, frame = video.read()
+#             if not success:
+#                 break
+
+#             # Run detection (no verbose prints, no built-in annotations)
+#             result, overlay = apriltag.detect_tags(
+#                 frame,
+#                 detector,
+#                 camera_params=camera_params,
+#                 tag_size=tag_size_m,
+#                 vizualization=0,   # keep the overlay clean; we'll draw our own
+#                 verbose=0,
+#                 annotation=False
+#             )
+
+#             # Collect centers and poses for tag 20 and 21, if found
+#             centers = {}
+#             tvecs = {}
+#             for i in range(0, len(result), 4):
+#                 det = result[i]        # apriltag.Detection
+#                 pose = result[i + 1]   # 3x4 pose matrix (tag->camera)
+#                 tid = getattr(det, 'tag_id', None)
+#                 if tid in want_ids:
+#                     centers[tid] = np.array(det.center, dtype=float)
+#                     tvecs[tid] = np.array(pose[:3, 3], dtype=float)
+
+#             # If both present, compute distances and draw
+#             if 20 in centers and 21 in centers:
+#                 # 2D pixel distance
+#                 pix_dist = float(np.linalg.norm(centers[20] - centers[21]))
+
+#                 # 3D distance in meters (using tag poses in camera frame)
+#                 if 20 in tvecs and 21 in tvecs:
+#                     m_dist = float(np.linalg.norm(tvecs[20] - tvecs[21]))
+#                 else:
+#                     m_dist = None
+
+#                 # Draw a line between the tag centers
+#                 p0 = tuple(np.round(centers[20]).astype(int))
+#                 p1 = tuple(np.round(centers[21]).astype(int))
+#                 cv2.line(overlay, p0, p1, (0, 255, 255), 2)
+
+#                 # Prepare the text
+#                 if m_dist is not None:
+#                     text = f"20↔21: {pix_dist:.1f}px | {m_dist:.3f} m"
+#                 else:
+#                     text = f"20↔21: {pix_dist:.1f}px"
+
+#                 # >>> ADDED: timestamps (real-world & elapsed since first data)
+#                 now = datetime.now()
+#                 ts_ms = f"{now:%Y-%m-%d %H:%M:%S}.{int(now.microsecond/1000):03d}"  # real-world to ms
+#                 now_ns = time.perf_counter_ns()
+#                 if t0_ns is None:
+#                     t0_ns = now_ns
+#                 elapsed_ms = (now_ns - t0_ns) // 1_000_000  # integer milliseconds
+
+#                 # Append timestamp to terminal print line
+#                 text_with_time = f"{text} | {ts_ms}"
+#                 # (If you wish to see relative time too, you could add: f" | +{elapsed_ms} ms")
+
+#                 # Put the text near the midpoint of the segment
+#                 mid = (int((p0[0] + p1[0]) / 2), int((p0[1] + p1[1]) / 2) - 10)
+#                 cv2.putText(overlay, text_with_time, mid, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+#                 # Terminal print (you can remove the throttle if you want every frame)
+#                 if frame_i % 10 == 0:
+#                     print(text_with_time)
+
+#                 # >>> ADDED: store row for CSV (m_dist blank if None)
+#                 rows.append([ts_ms, int(elapsed_ms), f"{pix_dist:.3f}", "" if m_dist is None else f"{m_dist:.6f}"])
+
+#             frame_i += 1
+
+#             # Optionally write/display
+#             if output_stream and output is not None:
+#                 output.write(overlay)
+
+#             if display_stream:
+#                 cv2.imshow(detection_window_name, overlay)
+#                 # Press space bar to terminate
+#                 if cv2.waitKey(1) & 0xFF == ord(' '):
+#                     break
+
+#         # >>> ADDED: write CSV when stream ends (if we collected any rows)
+#         if rows:
+#             with open(csv_name, "w", newline="") as f:
+#                 writer = csv.writer(f)
+#                 writer.writerow(["timestamp_ms", "elapsed_ms", "pix_dist", "m_dist"])
+#                 writer.writerows(rows)
+#             print(f"[INFO] Wrote CSV: {os.path.abspath(csv_name)}")
+
+#         if output_stream and output is not None:
+#             output.release()
+#         video.release()
+
+# ################################################################################
+
+# if __name__ == '__main__':
+#     apriltag_video()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #!/usr/bin/env python
 
 from argparse import ArgumentParser
@@ -602,7 +804,6 @@ import os
 import cv2
 import numpy as np
 import apriltag
-# >>> ADDED: for timestamps & CSV
 import csv
 import time
 from datetime import datetime
@@ -614,62 +815,65 @@ def apriltag_video(input_streams=[0],
                    display_stream=True,
                    detection_window_name='AprilTag'):
     """
-    Detect ONLY tags 20 and 21 from video. If both are visible,
+    Detect ONLY the two IDs in want_ids from video. If both are visible,
     draw a line between their image centers and display:
       - pixel distance between centers
       - 3D distance between tag centers (in meters), using pose estimation
+      - real-world timestamp to millisecond
+    Also logs CSV: timestamp_ms, elapsed_ms, pix_dist, m_dist
     """
 
     parser = ArgumentParser(description='Detect AprilTags from video stream.')
     apriltag.add_arguments(parser)
     options = parser.parse_args()
 
-    # Set up a reasonable search path for the apriltag DLL/so/dylib.
+    # AprilTag detector via options
     detector = apriltag.Detector(options, searchpath=apriltag._get_dll_path())
 
-    # Hard-coded camera intrinsics and tag size (in meters)
+    # ---- Your calibrated camera intrinsics ----
     camera_params = (1408.421651570743, 1405.3445689921414, 1028.1372748266583, 539.4602383823626)
     # fx, fy, cx, cy
     tag_size_m = 0.049  # meters
 
-    want_ids = {20, 21}
+    # ---- IDs you want to track (CHANGED HERE) ----
+    want_ids = {22, 23}
+    id_a, id_b = sorted(want_ids)   # use these everywhere below
 
     for stream in input_streams:
         video = cv2.VideoCapture(stream)
 
-        # Force 1080p (as before)
-        video.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        video.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-
-        # >>> ADDED: helpful smoothness defaults (safe to keep)
+        # Request 1080p & smoother capture (minimal, safe settings)
         video.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         video.set(cv2.CAP_PROP_FPS, 30)
+        video.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        video.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         video.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         actual_w = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = video.get(cv2.CAP_PROP_FPS)
         print(f"[INFO] Capture at {actual_w}x{actual_h} @ {actual_fps:.1f} FPS")
 
-        # >>> ADDED: CSV accumulation & timing anchors
-        rows = []                 # each row: [timestamp_ms, elapsed_ms, pix_dist, m_dist]
-        t0_ns = None              # first-data high-res timestamp (perf counter)
-        # CSV filename with start time (wall clock)
+        # CSV accumulation & timing anchors
+        rows = []                 # [timestamp_ms, elapsed_ms, pix_dist, m_dist]
+        t0_ns = None              # first-data high-res timer anchor
         csv_name = f"distance_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
+        # Optional output video
         output = None
         if output_stream:
             width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = int(video.get(cv2.CAP_PROP_FPS)) or 30
             codec = cv2.VideoWriter_fourcc(*'XVID')
-            if type(stream) != int:
-                output_path = os.path.join('..', 'media', 'output', os.path.splitext(os.path.basename(str(stream)))[0] + '.avi')
-            else:
+            if isinstance(stream, int):
                 output_path = os.path.join('..', 'media', 'output', f'camera_{stream}.avi')
+            else:
+                base = os.path.splitext(os.path.basename(str(stream)))[0] + '.avi'
+                output_path = os.path.join('..', 'media', 'output', base)
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             output = cv2.VideoWriter(output_path, codec, fps, (width, height))
 
-        # (keep optional print throttling if you need it)
         frame_i = 0
 
         while video.isOpened():
@@ -677,18 +881,18 @@ def apriltag_video(input_streams=[0],
             if not success:
                 break
 
-            # Run detection (no verbose prints, no built-in annotations)
+            # Detect (no built-in annotation)
             result, overlay = apriltag.detect_tags(
                 frame,
                 detector,
                 camera_params=camera_params,
                 tag_size=tag_size_m,
-                vizualization=0,   # keep the overlay clean; we'll draw our own
+                vizualization=0,
                 verbose=0,
                 annotation=False
             )
 
-            # Collect centers and poses for tag 20 and 21, if found
+            # Collect centers and poses for the IDs we care about
             centers = {}
             tvecs = {}
             for i in range(0, len(result), 4):
@@ -700,48 +904,45 @@ def apriltag_video(input_streams=[0],
                     tvecs[tid] = np.array(pose[:3, 3], dtype=float)
 
             # If both present, compute distances and draw
-            if 20 in centers and 21 in centers:
+            if id_a in centers and id_b in centers:
                 # 2D pixel distance
-                pix_dist = float(np.linalg.norm(centers[20] - centers[21]))
+                pix_dist = float(np.linalg.norm(centers[id_a] - centers[id_b]))
 
                 # 3D distance in meters (using tag poses in camera frame)
-                if 20 in tvecs and 21 in tvecs:
-                    m_dist = float(np.linalg.norm(tvecs[20] - tvecs[21]))
-                else:
-                    m_dist = None
+                m_dist = None
+                if id_a in tvecs and id_b in tvecs:
+                    m_dist = float(np.linalg.norm(tvecs[id_a] - tvecs[id_b]))
 
                 # Draw a line between the tag centers
-                p0 = tuple(np.round(centers[20]).astype(int))
-                p1 = tuple(np.round(centers[21]).astype(int))
+                p0 = tuple(np.round(centers[id_a]).astype(int))
+                p1 = tuple(np.round(centers[id_b]).astype(int))
                 cv2.line(overlay, p0, p1, (0, 255, 255), 2)
 
-                # Prepare the text
+                # Make the label dynamic (22↔23, etc.)
                 if m_dist is not None:
-                    text = f"20↔21: {pix_dist:.1f}px | {m_dist:.3f} m"
+                    text = f"{id_a}↔{id_b}: {pix_dist:.1f}px | {m_dist:.3f} m"
                 else:
-                    text = f"20↔21: {pix_dist:.1f}px"
+                    text = f"{id_a}↔{id_b}: {pix_dist:.1f}px"
 
-                # >>> ADDED: timestamps (real-world & elapsed since first data)
+                # Timestamps (real-world & elapsed since first data)
                 now = datetime.now()
-                ts_ms = f"{now:%Y-%m-%d %H:%M:%S}.{int(now.microsecond/1000):03d}"  # real-world to ms
+                ts_ms = f"{now:%Y-%m-%d %H:%M:%S}.{int(now.microsecond/1000):03d}"
                 now_ns = time.perf_counter_ns()
                 if t0_ns is None:
                     t0_ns = now_ns
-                elapsed_ms = (now_ns - t0_ns) // 1_000_000  # integer milliseconds
+                elapsed_ms = (now_ns - t0_ns) // 1_000_000
 
-                # Append timestamp to terminal print line
                 text_with_time = f"{text} | {ts_ms}"
-                # (If you wish to see relative time too, you could add: f" | +{elapsed_ms} ms")
 
-                # Put the text near the midpoint of the segment
+                # Put text near the midpoint of the segment
                 mid = (int((p0[0] + p1[0]) / 2), int((p0[1] + p1[1]) / 2) - 10)
                 cv2.putText(overlay, text_with_time, mid, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
-                # Terminal print (you can remove the throttle if you want every frame)
+                # Throttled terminal print (change or remove modulo if you want every frame)
                 if frame_i % 10 == 0:
                     print(text_with_time)
 
-                # >>> ADDED: store row for CSV (m_dist blank if None)
+                # Save row to CSV
                 rows.append([ts_ms, int(elapsed_ms), f"{pix_dist:.3f}", "" if m_dist is None else f"{m_dist:.6f}"])
 
             frame_i += 1
@@ -756,7 +957,7 @@ def apriltag_video(input_streams=[0],
                 if cv2.waitKey(1) & 0xFF == ord(' '):
                     break
 
-        # >>> ADDED: write CSV when stream ends (if we collected any rows)
+        # Write CSV (if any data was collected)
         if rows:
             with open(csv_name, "w", newline="") as f:
                 writer = csv.writer(f)
